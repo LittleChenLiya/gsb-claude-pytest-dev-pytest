@@ -821,6 +821,27 @@ For finalizers, the first fixture to run is last call to `request.addfinalizer`.
 This is so because yield fixtures use `addfinalizer` behind the scenes: when the fixture executes, `addfinalizer` registers a function that resumes the generator, which in turn calls the teardown code.
 
 
+Note on finalizer errors
+------------------------
+
+Finalization is best-effort and complete: pytest always runs *every*
+finalizer, even if one of them fails. A raising finalizer does not prevent
+the remaining finalizers of the same fixture (or of any other fixture or
+node still pending teardown) from running.
+
+If a single finalizer fails, its exception is propagated as-is. If several
+finalizers fail, the exceptions are aggregated and raised together as an
+:exc:`ExceptionGroup` (in registration order), so no error silently
+overwrites or hides another one.
+
+This guarantee also holds for exceptions derived from :exc:`BaseException`,
+such as :exc:`KeyboardInterrupt`, :exc:`SystemExit` or
+:exc:`asyncio.CancelledError`: an interruption during teardown still lets
+the remaining cleanup run (closing event loops, stopping tasks, removing
+temporary directories) before the interruption is propagated and pytest
+exits with the `INTERRUPTED` exit code.
+
+
 .. _`safe teardowns`:
 
 Safe teardowns

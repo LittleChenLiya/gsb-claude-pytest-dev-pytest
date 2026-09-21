@@ -1,6 +1,7 @@
 # mypy: allow-untyped-defs
 from __future__ import annotations
 
+import asyncio
 from functools import partial
 import inspect
 import os
@@ -22,7 +23,12 @@ import pytest
 
 
 if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
     from exceptiongroup import ExceptionGroup
+
+
+def _raise_exc(exc: BaseException) -> None:
+    raise exc
 
 
 class TestSetupState:
@@ -139,6 +145,114 @@ class TestSetupState:
         assert isinstance(mod, KeyError)
         assert isinstance(func.exceptions[0], TypeError)
         assert isinstance(func.exceptions[1], ValueError)
+
+    def test_teardown_keyboard_interrupt_still_runs_all_finalizers(
+        self, pytester: Pytester
+    ) -> None:
+        """A KeyboardInterrupt (or other BaseException) raised by a finalizer
+        must not abort the teardown loop: all remaining finalizers of the node
+        and of every node below it (e.g. session-scoped cleanup of temporary
+        directories) still run, and the stack is fully drained."""
+        ran: list[str] = []
+
+        def fin_interrupt():
+            ran.append("fin_interrupt")
+            raise KeyboardInterrupt()
+
+        item = pytester.getitem("def test_func(): pass")
+        mod = item.listchain()[-2]
+        ss = item.session._setupstate
+        ss.setup(item)
+        ss.addfinalizer(lambda: ran.append("fin_session"), item.session)
+        ss.addfinalizer(lambda: ran.append("fin_module"), mod)
+        ss.addfinalizer(lambda: ran.append("fin_func_first"), item)
+        ss.addfinalizer(fin_interrupt, item)
+        ss.addfinalizer(lambda: ran.append("fin_func_last"), item)
+        with pytest.raises(KeyboardInterrupt):
+            ss.teardown_exact(None)
+        # Finalizers run LIFO within a node and from the item up to the
+        # session; the interrupting finalizer does not prevent the rest.
+        assert ran == [
+            "fin_func_last",
+            "fin_interrupt",
+            "fin_func_first",
+            "fin_module",
+            "fin_session",
+        ]
+        assert not ss.stack
+
+    def test_teardown_base_exceptions_are_aggregated(self, pytester: Pytester) -> None:
+        """Multiple teardown failures, including BaseExceptions, are
+        aggregated into a BaseExceptionGroup instead of the first one
+        silently discarding the rest."""
+        ran: list[str] = []
+
+        item = pytester.getitem("def test_func(): pass")
+        ss = item.session._setupstate
+        ss.setup(item)
+        ss.addfinalizer(lambda: ran.append("fin_ok"), item)
+        ss.addfinalizer(
+            partial(_raise_exc, KeyboardInterrupt("interrupt teardown")), item
+        )
+        ss.addfinalizer(partial(_raise_exc, ValueError("regular error")), item)
+        with pytest.raises(BaseExceptionGroup, match="errors while tearing down") as e:
+            ss.teardown_exact(None)
+        assert ran == ["fin_ok"]
+        # Exceptions are reported in registration (FIFO) order.
+        exc_ki, exc_value = e.value.exceptions
+        assert isinstance(exc_ki, KeyboardInterrupt)
+        assert isinstance(exc_value, ValueError)
+        assert not ss.stack
+
+    def test_teardown_cancelled_error_still_runs_all_finalizers(
+        self, pytester: Pytester
+    ) -> None:
+        """asyncio.CancelledError is a BaseException (not an Exception) since
+        Python 3.8; a cancelled async teardown must not prevent the remaining
+        finalizers (e.g. closing event loops, removing temporary directories)
+        from running."""
+        ran: list[str] = []
+
+        item = pytester.getitem("def test_func(): pass")
+        ss = item.session._setupstate
+        ss.setup(item)
+        ss.addfinalizer(lambda: ran.append("fin_first"), item)
+        ss.addfinalizer(partial(_raise_exc, asyncio.CancelledError()), item)
+        ss.addfinalizer(lambda: ran.append("fin_last"), item)
+        with pytest.raises(asyncio.CancelledError):
+            ss.teardown_exact(None)
+        assert ran == ["fin_last", "fin_first"]
+        assert not ss.stack
+
+    def test_teardown_exact_partial_stack_with_failing_finalizer(
+        self, pytester: Pytester
+    ) -> None:
+        """A failing finalizer during a partial teardown (towards the next
+        item) releases only the completed nodes, in reverse order, and still
+        reports the error; nodes shared with the next item stay set up."""
+        items = pytester.getitems(
+            """
+            def test_1(): pass
+            def test_2(): pass
+            """
+        )
+        item1, item2 = items
+        ss = item1.session._setupstate
+        ss.setup(item1)
+        ran: list[str] = []
+        ss.addfinalizer(lambda: ran.append("fin_session"), item1.session)
+        ss.addfinalizer(partial(_raise_exc, ValueError("boom")), item1)
+        ss.addfinalizer(lambda: ran.append("fin_func"), item1)
+        with pytest.raises(ValueError, match="boom"):
+            ss.teardown_exact(item2)
+        # Only the item node was torn down; the error did not abort the
+        # finalizers of that node, and shared nodes remain on the stack.
+        assert ran == ["fin_func"]
+        assert item1 not in ss.stack
+        assert item1.session in ss.stack
+        ss.teardown_exact(None)
+        assert ran == ["fin_func", "fin_session"]
+        assert not ss.stack
 
     def test_cached_exception_doesnt_get_longer(self, pytester: Pytester) -> None:
         """Regression test for #12204 (the "BTW" case)."""

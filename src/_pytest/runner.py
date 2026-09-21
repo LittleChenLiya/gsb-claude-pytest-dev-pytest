@@ -566,7 +566,13 @@ class SetupState:
                 fin = finalizers.pop()
                 try:
                     fin()
-                except TEST_OUTCOME as e:
+                except BaseException as e:
+                    # Collect BaseException (not just TEST_OUTCOME) so that a
+                    # finalizer raising e.g. KeyboardInterrupt, SystemExit or
+                    # asyncio.CancelledError does not abort the teardown loop:
+                    # the remaining finalizers of this node and of all nodes
+                    # below it (session-scoped cleanup like temporary
+                    # directories, event loops, tasks) must still run.
                     these_exceptions.append(e)
 
             if len(these_exceptions) == 1:

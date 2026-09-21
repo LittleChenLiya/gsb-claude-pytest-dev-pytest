@@ -1,0 +1,7 @@
+Finalizers raising :exc:`KeyboardInterrupt`, :exc:`SystemExit` or other
+:exc:`BaseException` subclasses (such as :exc:`asyncio.CancelledError`) no
+longer abort the teardown sequence: all remaining finalizers of the node and
+of the nodes below it (e.g. session-scoped cleanup of temporary directories)
+are still run before the exception is propagated, and multiple teardown
+errors are aggregated into an exception group instead of discarding all but
+the first one.

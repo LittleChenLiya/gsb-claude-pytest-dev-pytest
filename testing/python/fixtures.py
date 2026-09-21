@@ -6170,6 +6170,270 @@ def test_classmethod_above_fixture_warning(pytester: Pytester) -> None:
     result.assert_outcomes(errors=1)
 
 
+def test_scoped_fixture_teardown_errors_all_run_and_are_reported(
+    pytester: Pytester,
+) -> None:
+    """Failing finalizers of fixtures at different scopes must not prevent
+    the remaining teardowns from running (in reverse setup order), and every
+    error is reported - aggregated into an exception group when a single
+    fixture fails in multiple ways - instead of discarding all but the
+    first."""
+    pytester.makepyfile(
+        """
+        import pathlib
+
+        import pytest
+
+        LOG = pathlib.Path(__file__).with_name("teardown.log")
+
+
+        def record(name):
+            with LOG.open("a") as f:
+                print(name, file=f)
+
+
+        @pytest.fixture(scope="session")
+        def session_fixture():
+            yield
+            record("session")
+
+
+        @pytest.fixture(scope="module")
+        def module_fixture(session_fixture, request):
+            def fail_finalizer():
+                record("module finalizer")
+                raise ValueError("module finalizer error")
+
+            request.addfinalizer(fail_finalizer)
+            yield
+            record("module")
+            raise ValueError("module teardown error")
+
+
+        @pytest.fixture(scope="function")
+        def function_fixture(module_fixture, request):
+            request.addfinalizer(lambda: record("function finalizer"))
+            yield
+            record("function")
+            raise ValueError("function teardown error")
+
+
+        def test_one(function_fixture):
+            pass
+
+
+        def test_two(function_fixture):
+            pass
+        """
+    )
+    result = pytester.runpytest()
+    # The function-scoped teardown of the first test errors; the teardown of
+    # the last test aggregates the function- and module-scoped failures into
+    # a single error report; no error is lost or overwritten by another one.
+    result.assert_outcomes(passed=2, errors=2)
+    result.stdout.fnmatch_lines(
+        [
+            "*function teardown error*",
+            '*ExceptionGroup: errors while tearing down fixture "module_fixture"*',
+            "*module finalizer error*",
+            "*module teardown error*",
+        ]
+    )
+    # Teardowns ran in reverse setup order, mixing yield fixtures and
+    # addfinalizer finalizers deterministically (LIFO per fixture: the
+    # yield-teardown of a fixture runs before finalizers registered by the
+    # fixture body itself).
+    assert (pytester.path / "teardown.log").read_text().splitlines() == [
+        "function",
+        "function finalizer",
+        "function",
+        "function finalizer",
+        "module",
+        "module finalizer",
+        "session",
+    ]
+
+
+def test_parametrized_fixture_teardown_failure_does_not_skip_remaining(
+    pytester: Pytester,
+) -> None:
+    """When a parametrized fixture's teardown fails for one parameter, the
+    fixture is still finalized exactly once per parameter and the remaining
+    parameters are set up and torn down normally."""
+    pytester.makepyfile(
+        """
+        import pathlib
+
+        import pytest
+
+        LOG = pathlib.Path(__file__).with_name("params.log")
+
+
+        def record(name):
+            with LOG.open("a") as f:
+                print(name, file=f)
+
+
+        @pytest.fixture(scope="module", params=["a", "b", "c"])
+        def parametrized(request):
+            record("setup " + request.param)
+            yield request.param
+            record("teardown " + request.param)
+            if request.param == "b":
+                raise ValueError("teardown b failed")
+
+
+        def test_one(parametrized):
+            pass
+
+
+        def test_two(parametrized):
+            pass
+        """
+    )
+    result = pytester.runpytest()
+    # The failed teardown of parameter "b" surfaces as an error on the first
+    # test of parameter "c" (the fixture is finalized lazily at setup time);
+    # the failed finalization does not corrupt the fixture state, so the
+    # remaining tests still run.
+    result.assert_outcomes(passed=5, errors=1)
+    result.stdout.fnmatch_lines(["*teardown b failed*"])
+    assert (pytester.path / "params.log").read_text().splitlines() == [
+        "setup a",
+        "teardown a",
+        "setup b",
+        "teardown b",
+        "setup c",
+        "teardown c",
+    ]
+
+
+def test_keyboard_interrupt_in_teardown_runs_remaining_finalizers(
+    pytester: Pytester,
+) -> None:
+    """A KeyboardInterrupt raised by a finalizer must not abort the teardown
+    sequence: all remaining finalizers (including session-scoped cleanup of
+    temporary directories) run before the interrupt propagates and pytest
+    exits with the INTERRUPTED exit code."""
+    pytester.makepyfile(
+        """
+        import pathlib
+
+        import pytest
+
+        LOG = pathlib.Path(__file__).with_name("interrupt.log")
+
+
+        def record(name):
+            with LOG.open("a") as f:
+                print(name, file=f)
+
+
+        @pytest.fixture(scope="session")
+        def session_fixture():
+            yield
+            record("session")
+
+
+        @pytest.fixture(scope="module")
+        def module_fixture(session_fixture):
+            yield
+            record("module")
+
+
+        @pytest.fixture(scope="function")
+        def function_fixture(module_fixture):
+            yield
+            record("function")
+
+
+        @pytest.fixture(scope="function")
+        def interrupting_fixture(function_fixture):
+            yield
+            record("interrupting")
+            raise KeyboardInterrupt
+
+
+        def test_one(interrupting_fixture):
+            pass
+        """
+    )
+    # no_reraise_ctrlc keeps the KeyboardInterrupt of the child run from
+    # being re-raised into this test, so the exit code can be asserted.
+    result = pytester.runpytest_inprocess(no_reraise_ctrlc=True)
+    assert result.ret == ExitCode.INTERRUPTED
+    assert (pytester.path / "interrupt.log").read_text().splitlines() == [
+        "interrupting",
+        "function",
+        "module",
+        "session",
+    ]
+
+
+def test_cancelled_async_teardown_runs_remaining_finalizers(
+    pytester: Pytester,
+) -> None:
+    """asyncio.CancelledError (a BaseException) raised while tearing down an
+    async-style resource must not leak the remaining cleanup: every event
+    loop is still closed, including nested/outer loops."""
+    pytester.makepyfile(
+        """
+        import asyncio
+        import pathlib
+
+        import pytest
+
+        LOG = pathlib.Path(__file__).with_name("loops.log")
+
+
+        def record(name):
+            with LOG.open("a") as f:
+                print(name, file=f)
+
+
+        class Loop:
+            def __init__(self, name):
+                self.name = name
+                self.loop = asyncio.new_event_loop()
+
+            def close(self):
+                self.loop.run_until_complete(asyncio.sleep(0))
+                self.loop.close()
+                record("closed " + self.name)
+
+
+        @pytest.fixture(scope="module")
+        def outer_loop():
+            loop = Loop("outer")
+            yield loop
+            loop.close()
+
+
+        @pytest.fixture(scope="function")
+        def inner_loop(outer_loop):
+            loop = Loop("inner")
+            yield loop
+            loop.close()
+            raise asyncio.CancelledError
+
+
+        def test_one(inner_loop):
+            pass
+
+
+        def test_two(inner_loop):
+            pass
+        """
+    )
+    result = pytester.runpytest()
+    result.assert_outcomes(passed=2, errors=2)
+    assert (pytester.path / "loops.log").read_text().splitlines() == [
+        "closed inner",
+        "closed inner",
+        "closed outer",
+    ]
+
+
 @pytest.mark.filterwarnings(
     "default:fixture * is wrapped by @staticmethod*:pytest.PytestWarning"
 )
