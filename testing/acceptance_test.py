@@ -1441,84 +1441,64 @@ def test_error_on_async_gen_function(pytester: Pytester) -> None:
     result.assert_outcomes(failed=3)
 
 
-def test_error_on_sync_test_async_fixture(pytester: Pytester) -> None:
+def test_sync_test_async_fixture(pytester: Pytester) -> None:
+    """Async (coroutine) fixtures are natively supported and awaited."""
     pytester.makepyfile(
         test_sync="""
             import pytest
 
             @pytest.fixture
             async def async_fixture():
-                ...
+                return 42
 
             def test_foo(async_fixture):
-                # suppress unawaited coroutine warning
-                try:
-                    async_fixture.send(None)
-                except StopIteration:
-                    pass
+                assert async_fixture == 42
         """
     )
     result = pytester.runpytest()
-    result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(
-        [
-            "'test_foo' requested an async fixture 'async_fixture', with no plugin or hook that handled it. "
-            "This is an error, as pytest does not natively support it."
-        ]
-    )
+    result.assert_outcomes(passed=1)
 
 
-def test_error_on_sync_test_async_fixture_gen(pytester: Pytester) -> None:
+def test_sync_test_async_fixture_gen(pytester: Pytester) -> None:
+    """Async yield fixtures are natively supported, including teardown."""
     pytester.makepyfile(
         test_sync="""
             import pytest
 
+            finalized = []
+
             @pytest.fixture
             async def async_fixture():
-                yield
+                yield 42
+                finalized.append(True)
 
             def test_foo(async_fixture):
-                # async gens don't emit unawaited-coroutine
-                ...
+                assert async_fixture == 42
+
+            def test_finalized():
+                assert finalized == [True]
         """
     )
     result = pytester.runpytest()
-    result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(
-        [
-            "'test_foo' requested an async fixture 'async_fixture', with no plugin or hook that handled it. "
-            "This is an error, as pytest does not natively support it."
-        ]
-    )
+    result.assert_outcomes(passed=2)
 
 
-def test_error_on_sync_test_async_autouse_fixture(pytester: Pytester) -> None:
+def test_sync_test_async_autouse_fixture(pytester: Pytester) -> None:
+    """Autouse async fixtures are natively supported."""
     pytester.makepyfile(
         test_sync="""
             import pytest
 
             @pytest.fixture(autouse=True)
             async def async_fixture():
-                ...
+                return 42
 
-            # We explicitly request the fixture to be able to
-            # suppress the RuntimeWarning for unawaited coroutine.
-            def test_foo(async_fixture):
-                try:
-                    async_fixture.send(None)
-                except StopIteration:
-                    pass
+            def test_foo(request):
+                assert request.getfixturevalue("async_fixture") == 42
         """
     )
     result = pytester.runpytest()
-    result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(
-        [
-            "'test_foo' requested an async fixture 'async_fixture' with autouse=True, "
-            "with no plugin or hook that handled it. "
-            "This is an error, as pytest does not natively support it."
-        ]
-    )
+    result.assert_outcomes(passed=1)
 
 
 def test_pdb_can_be_rewritten(pytester: Pytester) -> None:

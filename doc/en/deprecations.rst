@@ -527,6 +527,12 @@ sync test depending on async fixture
 .. deprecated:: 8.4
 .. versionremoved:: 9.0
 
+.. note::
+
+    Since pytest 9.2, async fixtures are :ref:`supported natively <async fixtures>`,
+    so synchronous tests may depend on them directly and the error described
+    below is no longer emitted.
+
 Pytest has for a long time given an error when encountering an asynchronous test function, prompting the user to install
 a plugin that can handle it. It has not given any errors if you have an asynchronous fixture that's depended on by a
 synchronous test. If the fixture was an async function you did get an "unawaited coroutine" warning, but for async yield fixtures you didn't even get that.

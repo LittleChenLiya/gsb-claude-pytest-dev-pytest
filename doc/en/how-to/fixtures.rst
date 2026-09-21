@@ -821,6 +821,57 @@ For finalizers, the first fixture to run is last call to `request.addfinalizer`.
 This is so because yield fixtures use `addfinalizer` behind the scenes: when the fixture executes, `addfinalizer` registers a function that resumes the generator, which in turn calls the teardown code.
 
 
+.. _async fixtures:
+
+Async fixtures
+--------------
+
+.. versionadded:: 9.2
+
+Fixtures may be defined as ``async def`` coroutine functions or as async
+yield fixtures, and pytest will execute them natively, without requiring an
+async plugin:
+
+.. code-block:: python
+
+    import pytest
+
+
+    @pytest.fixture
+    async def connection():
+        return await connect()
+
+
+    @pytest.fixture(scope="module")
+    async def database():
+        db = await create_database()
+        yield db
+        await db.close()
+
+All async fixtures of the same scope share a single event loop, so resources
+created by one fixture (connections, locks, tasks) can be used by the other
+fixtures and tests of that scope. The loop is shut down and closed once the
+last async fixture of the scope is finalized, so no event loops, pending
+tasks or other resources leak - even if the session is interrupted, for
+example by :kbd:`Ctrl-C`.
+
+Teardown follows the same rules as for synchronous fixtures: fixtures are
+finalized in reverse dependency (topological) order, ``request.addfinalizer``
+callbacks compose with yield teardown in the usual LIFO order, and if
+several finalizers of one fixture raise, the exceptions are aggregated into
+an exception group instead of discarding all but the first one. Finalizers
+registered with ``request.addfinalizer`` may themselves be ``async def``
+functions; they are awaited on the event loop of the fixture's scope.
+
+Note that this only covers async *fixtures*; async *test functions* still
+require a plugin such as `pytest-asyncio`_` or `anyio`_`. Plugins which
+implement the ``pytest_fixture_setup`` hook take precedence over the native
+handling, so existing async plugins keep working unchanged.
+
+.. _pytest-asyncio: https://github.com/pytest-dev/pytest-asyncio
+.. _anyio: https://anyio.readthedocs.io/en/stable/testing.html
+
+
 .. _`safe teardowns`:
 
 Safe teardowns

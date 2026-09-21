@@ -1,0 +1,5 @@
+pytest now natively supports async fixtures: fixtures defined as ``async def``
+coroutine functions or async generators are executed on a shared event loop
+per fixture scope, with reliable teardown (reverse dependency order, stable
+``addfinalizer``/yield composition, aggregated teardown errors) and no leaked
+event loops, tasks or temporary directories when the session is interrupted.

@@ -84,6 +84,8 @@ if sys.version_info < (3, 11):
 
 
 if TYPE_CHECKING:
+    import asyncio
+
     from _pytest.python import CallSpec
     from _pytest.python import Function
     from _pytest.python import Metafunc
@@ -117,6 +119,21 @@ _FixtureCachedResult = (
 
 def pytest_sessionstart(session: Session) -> None:
     session._fixturemanager = FixtureManager(session)
+
+
+@hookimpl(trylast=True)
+def pytest_sessionfinish(session: Session) -> None:
+    """Shut down any async fixture event loops which are still open.
+
+    Normally each loop is closed once the last async fixture of its scope is
+    finalized, but if the session was interrupted (e.g. by KeyboardInterrupt
+    or cancellation) some fixtures may never be finalized. Make sure we do
+    not leak event loops, tasks or other resources in that case.
+    """
+    fm = session._fixturemanager
+    for state in fm._async_fixture_loops.values():
+        _shutdown_async_fixture_loop(state.loop)
+    fm._async_fixture_loops.clear()
 
 
 def get_scope_package(
@@ -630,7 +647,14 @@ class FixtureRequest(abc.ABC):
     @abc.abstractmethod
     def addfinalizer(self, finalizer: Callable[[], object]) -> None:
         """Add finalizer/teardown function to be called without arguments after
-        the last test within the requesting test context finished execution."""
+        the last test within the requesting test context finished execution.
+
+        The finalizer may be a regular or an `async def` function; async
+        finalizers are awaited on the event loop of the fixture's scope.
+        Finalizers are executed in LIFO order, and if multiple finalizers
+        raise, the exceptions are aggregated into an exception group instead
+        of discarding all but the first one.
+        """
         raise NotImplementedError()
 
     def applymarker(self, marker: str | MarkDecorator) -> None:
@@ -1083,6 +1107,184 @@ def _teardown_yield_fixture(fixturefunc, it) -> None:
         )
 
 
+@dataclasses.dataclass
+class _AsyncFixtureLoopState:
+    """The event loop used to execute async fixtures of a given scope, along
+    with the number of fixtures currently using it.
+
+    All async fixtures of the same scope share a single event loop, so that
+    resources created by one fixture (e.g. connections, locks) can be used by
+    other fixtures and by the tests of that scope. The loop is shut down and
+    closed once the last fixture using it has been finalized.
+    """
+
+    loop: asyncio.AbstractEventLoop
+    users: int = 0
+
+
+def _get_async_fixture_loop(
+    fixturedef: FixtureDef[object], request: FixtureRequest
+) -> _AsyncFixtureLoopState:
+    """Get (creating if necessary) the loop state for the fixture's scope."""
+    fm = request._fixturemanager
+    state = fm._async_fixture_loops.get(fixturedef._scope)
+    if state is None or state.loop.is_closed():
+        # Imported lazily: importing asyncio is somewhat costly and only
+        # needed when async fixtures are actually used.
+        import asyncio
+
+        state = _AsyncFixtureLoopState(loop=asyncio.new_event_loop())
+        fm._async_fixture_loops[fixturedef._scope] = state
+    return state
+
+
+def _shutdown_async_fixture_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel pending tasks, shut down async generators and the default
+    executor, and close the loop, so no tasks, loops or resources leak."""
+    if loop.is_closed():
+        return
+    try:
+        import asyncio
+
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.run_until_complete(loop.shutdown_default_executor())
+    finally:
+        loop.close()
+
+
+def _run_awaitable_on_loop(loop: asyncio.AbstractEventLoop, awaitable: Any) -> Any:
+    """Run an awaitable on the given loop.
+
+    If the run is interrupted (e.g. by KeyboardInterrupt or cancellation),
+    the task is cancelled and the cancellation is drained, so no pending
+    task is left behind on the loop.
+    """
+
+    async def await_it() -> Any:
+        return await awaitable
+
+    task = loop.create_task(await_it())
+    try:
+        return loop.run_until_complete(task)
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            try:
+                loop.run_until_complete(task)
+            except BaseException:
+                # The loop was interrupted again; nothing more we can do
+                # here, the loop will be shut down forcefully later.
+                pass
+        raise
+
+
+def _acquire_async_fixture_loop(
+    fixturedef: FixtureDef[object], request: SubRequest
+) -> _AsyncFixtureLoopState:
+    """Acquire the loop for the fixture's scope, registering a finalizer
+    which releases (and eventually closes) it when the fixture is finalized."""
+    state = _get_async_fixture_loop(fixturedef, request)
+    state.users += 1
+
+    def release() -> None:
+        state.users -= 1
+        if state.users <= 0:
+            fm = request._fixturemanager
+            # Only remove the mapping if it still points to this state; it
+            # may already have been replaced by a newer loop for the scope.
+            if fm._async_fixture_loops.get(fixturedef._scope) is state:
+                del fm._async_fixture_loops[fixturedef._scope]
+            _shutdown_async_fixture_loop(state.loop)
+
+    # Register before the fixture's own teardown finalizer, so that it runs
+    # after it (finalizers are executed in LIFO order).
+    request.addfinalizer(release)
+    return state
+
+
+def _call_async_fixture_func(
+    fixturedef: FixtureDef[object],
+    fixturefunc: Callable[..., Any],
+    request: SubRequest,
+    kwargs: dict[str, object],
+) -> object:
+    """Execute an async (coroutine) fixture function on the scope's loop."""
+    state = _acquire_async_fixture_loop(fixturedef, request)
+    return _run_awaitable_on_loop(state.loop, fixturefunc(**kwargs))
+
+
+def _call_asyncgen_fixture_func(
+    fixturedef: FixtureDef[object],
+    fixturefunc: Callable[..., Any],
+    request: SubRequest,
+    kwargs: dict[str, object],
+) -> object:
+    """Execute the setup part of an async yield fixture on the scope's loop,
+    registering a finalizer for the teardown part."""
+    state = _acquire_async_fixture_loop(fixturedef, request)
+    agen = fixturefunc(**kwargs)
+    try:
+        fixture_result = _run_awaitable_on_loop(state.loop, agen.asend(None))
+    except StopAsyncIteration:
+        raise ValueError(f"{request.fixturename} did not yield a value") from None
+    finalizer = functools.partial(_teardown_asyncgen_fixture, fixturefunc, agen, state)
+    request.addfinalizer(finalizer)
+    return fixture_result
+
+
+def _teardown_asyncgen_fixture(
+    fixturefunc, agen, state: _AsyncFixtureLoopState
+) -> None:
+    """Execute the teardown of an async yield fixture by advancing the
+    async generator after the yield and ensure the iteration ends (if not
+    it means there is more than one yield in the function)."""
+    loop = state.loop
+    if loop.is_closed():
+        # The loop was force-closed (e.g. the session was interrupted);
+        # pending async generators were shut down along with the loop.
+        return
+    try:
+        try:
+            _run_awaitable_on_loop(loop, agen.asend(None))
+        except StopAsyncIteration:
+            pass
+        else:
+            fs, lineno = getfslineno(fixturefunc)
+            fail(
+                f"fixture function has more than one 'yield':\n\n"
+                f"{Source(fixturefunc).indent()}\n"
+                f"{fs}:{lineno + 1}",
+                pytrace=False,
+            )
+    finally:
+        _run_awaitable_on_loop(loop, agen.aclose())
+
+
+def _run_async_finalizer(
+    fixturedef: FixtureDef[object], request: SubRequest, awaitable: Any
+) -> None:
+    """Run an awaitable returned by a finalizer.
+
+    Runs on the loop of the fixture's scope if it is still open, otherwise
+    on a throwaway loop.
+    """
+    state = request._fixturemanager._async_fixture_loops.get(fixturedef._scope)
+    if state is not None and not state.loop.is_closed():
+        _run_awaitable_on_loop(state.loop, awaitable)
+    else:
+        import asyncio
+
+        async def await_it() -> None:
+            await awaitable
+
+        asyncio.run(await_it())
+
+
 def _eval_scope_callable(
     scope_callable: Callable[[str, Config], ScopeName],
     fixture_name: str,
@@ -1212,7 +1414,11 @@ class FixtureDef(Generic[FixtureValue]):
         while self._finalizers:
             fin = self._finalizers.pop()
             try:
-                fin()
+                result = fin()
+                # Support async finalizers: a finalizer which is an async
+                # function returns a coroutine (an awaitable) when called.
+                if inspect.isawaitable(result):
+                    _run_async_finalizer(self, request, result)
             except BaseException as e:
                 exceptions.append(e)
         node = request.node
@@ -1382,19 +1588,19 @@ def pytest_fixture_setup(
     fixturefunc = resolve_fixture_function(fixturedef, request)
     my_cache_key = fixturedef.cache_key(request)
 
-    if inspect.isasyncgenfunction(fixturefunc) or inspect.iscoroutinefunction(
-        fixturefunc
-    ):
-        auto_str = " with autouse=True" if fixturedef._autouse else ""
-        fail(
-            f"{request.node.name!r} requested an async fixture {request.fixturename!r}{auto_str}, "
-            "with no plugin or hook that handled it. This is an error, as pytest does not natively support it.\n"
-            "See: https://docs.pytest.org/en/stable/deprecations.html#sync-test-depending-on-async-fixture",
-            pytrace=False,
-        )
-
     try:
-        result = call_fixture_func(fixturefunc, request, kwargs)
+        if inspect.isasyncgenfunction(fixturefunc):
+            result = cast(
+                FixtureValue,
+                _call_asyncgen_fixture_func(fixturedef, fixturefunc, request, kwargs),
+            )
+        elif inspect.iscoroutinefunction(fixturefunc):
+            result = cast(
+                FixtureValue,
+                _call_async_fixture_func(fixturedef, fixturefunc, request, kwargs),
+            )
+        else:
+            result = call_fixture_func(fixturefunc, request, kwargs)
     except TEST_OUTCOME as e:
         if isinstance(e, skip.Exception):
             # The test requested a fixture which caused a skip.
@@ -1812,6 +2018,10 @@ class FixtureManager:
         # Pending conftest modules waiting to be parsed when their Directory is collected.
         # Maps directory path -> conftest plugin module.
         self._pending_conftests: Final[dict[Path, object]] = {}
+        # Event loops used to run async fixtures, keyed by scope.
+        # All async fixtures of the same scope share one loop; a loop is
+        # shut down and closed when the last fixture using it is finalized.
+        self._async_fixture_loops: Final[dict[Scope, _AsyncFixtureLoopState]] = {}
         session.config.pluginmanager.register(self, "funcmanage")
         # Flush initial conftests from directories above rootpath immediately.
         # These will never get a Directory collector, so they need Session scope.
