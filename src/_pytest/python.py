@@ -996,6 +996,79 @@ class IdMaker:
         )
         return resolved
 
+    def make_unique_parameterset_ids_with_explicit_and_original(
+        self,
+    ) -> list[tuple[str | _HiddenParam, str | None, bool]]:
+        """Like :meth:`make_unique_parameterset_ids_with_explicit`, but also
+        returns the original ID (before deduplication).
+
+        Returns a list of tuples (unique_id, original_id, is_explicit), where:
+        - unique_id is the deduplicated ID used for the nodeid
+        - original_id is the ID before deduplication (used for identity export)
+        - is_explicit indicates whether the ID was explicitly provided by the user
+        """
+        resolved = list(self._resolve_ids())
+        # Keep track of original IDs before deduplication.
+        original_ids: list[str | None] = [
+            id if id is not HIDDEN_PARAM else None for id, _ in resolved
+        ]
+        resolved_ids = [id for id, _ in resolved]
+        # All IDs must be unique!
+        if len(resolved_ids) != len(set(resolved_ids)):
+            # Record the number of occurrences of each ID.
+            id_counts = Counter(resolved_ids)
+
+            if self._strict_parametrization_ids_enabled():
+                parameters = ", ".join(self.argnames)
+                parametersets = ", ".join(
+                    [saferepr(list(param.values)) for param in self.parametersets]
+                )
+                ids = ", ".join(
+                    id if id is not HIDDEN_PARAM else "<hidden>" for id in resolved_ids
+                )
+                duplicates = ", ".join(
+                    id if id is not HIDDEN_PARAM else "<hidden>"
+                    for id, count in id_counts.items()
+                    if count > 1
+                )
+                msg = textwrap.dedent(f"""
+                    Duplicate parametrization IDs detected, but strict_parametrization_ids is set.
+
+                    Test name:      {self.nodeid}
+                    Parameters:     {parameters}
+                    Parameter sets: {parametersets}
+                    IDs:            {ids}
+                    Duplicates:     {duplicates}
+
+                    You can fix this problem using `@pytest.mark.parametrize(..., ids=...)` or `pytest.param(..., id=...)`.
+                """).strip()  # noqa: E501
+                raise nodes.Collector.CollectError(msg)
+
+            # Map the ID to its next suffix.
+            id_suffixes: dict[str, int] = defaultdict(int)
+            # Suffix non-unique IDs to make them unique.
+            for index, (id, is_explicit) in enumerate(resolved):
+                if id_counts[id] > 1:
+                    if id is HIDDEN_PARAM:
+                        self._complain_multiple_hidden_parameter_sets()
+                    suffix = ""
+                    if id and id[-1].isdigit():
+                        suffix = "_"
+                    new_id = f"{id}{suffix}{id_suffixes[id]}"
+                    while new_id in set(resolved_ids):
+                        id_suffixes[id] += 1
+                        new_id = f"{id}{suffix}{id_suffixes[id]}"
+                    resolved[index] = (new_id, is_explicit)
+                    resolved_ids[index] = new_id
+                    id_suffixes[id] += 1
+        assert len(resolved_ids) == len(set(resolved_ids)), (
+            f"Internal error: {resolved_ids=}"
+        )
+        return [
+            (unique_id, original_id, is_explicit)
+            for (unique_id, is_explicit), original_id in zip(resolved, original_ids, strict=True)
+        ]
+
     def _strict_parametrization_ids_enabled(self) -> bool:
         if self.config is None:
             return False
@@ -1197,6 +1270,11 @@ class CallSpec:
     # One entry per _idlist entry, containing the parameter names that the
     # corresponding parametrize() call parametrized.
     _argnames_per_id: Sequence[Sequence[str]] = dataclasses.field(default_factory=tuple)
+    # One entry per _idlist entry, containing the original ID (before
+    # deduplication). This is used for identity export, where the original
+    # explicit ID should be used even if pytest appended a suffix to make the
+    # nodeid unique.
+    _original_ids: Sequence[str] = dataclasses.field(default_factory=tuple)
     # Marks which will be applied to the item.
     marks: list[Mark] = dataclasses.field(default_factory=list)
 
@@ -1207,6 +1285,7 @@ class CallSpec:
         valset: Iterable[object],
         id: str | _HiddenParam,
         id_explicit: bool,
+        original_id: str | None = None,
         marks: Iterable[Mark | MarkDecorator],
         scope: Scope,
         param_index: int,
@@ -1228,10 +1307,12 @@ class CallSpec:
             idlist = self._idlist
             id_explicit_list = self._id_explicit
             argnames_per_id = self._argnames_per_id
+            original_ids = self._original_ids
         else:
             idlist = [*self._idlist, id]
             id_explicit_list = [*self._id_explicit, id_explicit]
             argnames_per_id = [*self._argnames_per_id, argnames]
+            original_ids = [*self._original_ids, original_id if original_id is not None else id]
         return CallSpec(
             params=params,
             indices=indices,
@@ -1239,6 +1320,7 @@ class CallSpec:
             _idlist=idlist,
             _id_explicit=id_explicit_list,
             _argnames_per_id=argnames_per_id,
+            _original_ids=original_ids,
             marks=[*self.marks, *normalize_mark_list(marks)],
         )
 
@@ -1459,13 +1541,14 @@ class Metafunc:
         )
 
         # Store used (possibly generated) ids with parametrize Marks.
-        # We store only the ids (not the is_explicit flags) for backward
-        # compatibility with code that reads _param_ids_generated.
+        # We store only the unique ids (not the original ids or is_explicit
+        # flags) for backward compatibility with code that reads
+        # _param_ids_generated.
         if _param_mark and _param_mark._param_ids_from and generated_ids is None:
             object.__setattr__(
                 _param_mark._param_ids_from,
                 "_param_ids_generated",
-                [id for id, _ in ids],
+                [unique_id for unique_id, _, _ in ids],
             )
 
         # Calculate directness.
@@ -1526,7 +1609,7 @@ class Metafunc:
         # of all calls.
         newcalls = []
         for callspec in self._calls or [CallSpec()]:
-            for param_index, ((param_id, id_explicit), param_set) in enumerate(
+            for param_index, ((param_id, original_id, id_explicit), param_set) in enumerate(
                 zip(ids, parametersets, strict=True)
             ):
                 newcallspec = callspec.setmulti(
@@ -1534,6 +1617,7 @@ class Metafunc:
                     valset=param_set.values,
                     id=param_id,
                     id_explicit=id_explicit,
+                    original_id=original_id,
                     marks=param_set.marks,
                     scope=scope_,
                     param_index=param_index,
@@ -1548,7 +1632,7 @@ class Metafunc:
         ids: Iterable[object | None] | Callable[[Any], object | None] | None,
         parametersets: Sequence[ParameterSet],
         nodeid: str,
-    ) -> list[tuple[str | _HiddenParam, bool]]:
+    ) -> list[tuple[str | _HiddenParam, str | None, bool]]:
         """Resolve the actual ids for the given parameter sets.
 
         :param argnames:
@@ -1562,9 +1646,11 @@ class Metafunc:
             The nodeid of the definition item that generated this
             parametrization.
         :returns:
-            List with tuples of (id, is_explicit) for each parameter set given,
-            where is_explicit indicates whether the ID was explicitly provided
-            by the user.
+            List with tuples of (unique_id, original_id, is_explicit) for each
+            parameter set given, where:
+            - unique_id is the deduplicated ID used for the nodeid
+            - original_id is the ID before deduplication (used for identity export)
+            - is_explicit indicates whether the ID was explicitly provided by the user
         """
         if ids is None:
             idfn = None
@@ -1583,7 +1669,7 @@ class Metafunc:
             self.config,
             nodeid=nodeid,
         )
-        return id_maker.make_unique_parameterset_ids_with_explicit()
+        return id_maker.make_unique_parameterset_ids_with_explicit_and_original()
 
     def _validate_ids(
         self,

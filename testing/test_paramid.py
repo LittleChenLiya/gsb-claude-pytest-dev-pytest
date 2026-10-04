@@ -80,17 +80,18 @@ def test_export_param_ids_unstable_object(pytester: Pytester) -> None:
 
 
 def test_export_param_ids_conflict(pytester: Pytester) -> None:
-    """Test that duplicate stable identities are reported as CONFLICT."""
+    """Test that duplicate stable identities are reported as CONFLICT.
+
+    When two parameter sets have the same explicit ID, pytest appends a suffix
+    to make the nodeid unique, but the stable identity (which uses the original
+    explicit ID) is the same for both. This should be reported as a CONFLICT.
+    """
     pytester.makepyfile(
         """
         import pytest
 
-        @pytest.mark.parametrize("x", [1], ids=["small"])
+        @pytest.mark.parametrize("x", [1, 2], ids=["small", "small"])
         def test_func(x):
-            assert True
-
-        @pytest.mark.parametrize("y", [2], ids=["small"])
-        def test_other(y):
             assert True
         """
     )
@@ -100,7 +101,7 @@ def test_export_param_ids_conflict(pytester: Pytester) -> None:
 
     result.stdout.fnmatch_lines(
         [
-            "*CONFLICT*small*",
+            "*CONFLICT*test_func?x=small?*test_func?small?*test_func?small1?",
         ]
     )
 

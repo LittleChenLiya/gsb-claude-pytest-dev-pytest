@@ -105,15 +105,24 @@ def _extract_identity(item: Item, config: Config) -> tuple[str, bool] | None:
     argnames_per_id: Sequence[Sequence[str]] = getattr(
         callspec, "_argnames_per_id", ()
     )
+    # Use original IDs (before deduplication) for the identity, so that
+    # duplicate explicit IDs are detected as conflicts.
+    original_ids: Sequence[str | None] = getattr(callspec, "_original_ids", ())
     params: dict[str, object] = getattr(callspec, "params", {})
 
     for i, param_id in enumerate(idlist):
         is_explicit = id_explicit[i] if i < len(id_explicit) else False
         argnames = argnames_per_id[i] if i < len(argnames_per_id) else ()
+        # Use the original ID if available, otherwise fall back to the
+        # deduplicated ID.
+        original_id = (
+            original_ids[i] if i < len(original_ids) and original_ids[i] is not None
+            else param_id
+        )
         for argname in argnames:
             if is_explicit:
                 # Explicit ID: stable.
-                param_pairs.append((argname, param_id, True))
+                param_pairs.append((argname, original_id, True))
             else:
                 # No explicit ID: try to stably encode the value.
                 value = params.get(argname)
