@@ -16,6 +16,7 @@ Core pytest functionality
    fixtures
    mark
    parametrize
+   stable-manifest
    subtests
    tmp_path
    monkeypatch
