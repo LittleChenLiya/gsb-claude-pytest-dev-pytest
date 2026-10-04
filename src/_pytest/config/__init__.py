@@ -361,6 +361,7 @@ default_plugins = (
     "cacheprovider",
     "setuponly",
     "setupplan",
+    "paramid",
     "stepwise",
     "unraisableexception",
     "threadexception",
