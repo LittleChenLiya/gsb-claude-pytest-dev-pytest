@@ -1,0 +1,7 @@
+Added the ``--markers-explain`` command-line option, which shows an
+explanation of the markers collected on each test item.  Markers are listed
+in priority order (closest first), annotated with their source (module,
+class, parametrize or function) and a stable sequence number.  Same-name
+markers are kept as separate entries, and markers that are used but not
+registered are diagnosed separately.  The report is read-only and does not
+trigger fixture setup.

@@ -8,6 +8,13 @@ metadata on your test functions. You can find the full list of builtin markers
 in the :ref:`API Reference<marks ref>`. Or you can list all the markers, including
 builtin and custom, using the CLI - :code:`pytest --markers`.
 
+To see an explanation of the markers collected on each test item, including
+their source (module, class, parametrize or function) and priority, use
+:code:`pytest --markers-explain`.  Markers are listed in priority order
+(closest first) with a stable sequence number, and same-name markers are kept
+as separate entries.  Markers that are used but not registered are diagnosed
+separately.  The report is read-only and does not trigger fixture setup.
+
 Here are some of the builtin markers:
 
 * :ref:`usefixtures <usefixtures>` - use fixtures on a test function or class

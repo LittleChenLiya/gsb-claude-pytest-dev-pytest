@@ -111,6 +111,93 @@ def test_markers_option(pytester: Pytester) -> None:
     )
 
 
+def test_markers_explain(pytester: Pytester) -> None:
+    """The --markers-explain report lists markers by source with stable
+    sequence numbers, without triggering fixtures or modifying keywords."""
+    pytester.makeini(
+        """
+        [pytest]
+        markers =
+            slow: slow marker
+    """
+    )
+    # A fixture with a side effect: if the report triggered fixture setup,
+    # the file would be created. This verifies the report is read-only.
+    pytester.makeconftest(
+        """
+        import pytest
+
+        @pytest.fixture
+        def side_effect_fixture():
+            with open("fixture_triggered.txt", "w") as f:
+                f.write("triggered")
+            yield
+    """
+    )
+    pytester.makepyfile(
+        """
+        import pytest
+
+        pytestmark = pytest.mark.slow
+
+        @pytest.mark.parametrize("param", [
+            pytest.param(1, marks=pytest.mark.slow),
+            2,
+        ])
+        def test_func(param, side_effect_fixture):
+            assert True
+
+        class TestClass:
+            @pytest.mark.slow
+            @pytest.mark.slow
+            def test_method(self):
+                assert True
+    """
+    )
+    result = pytester.runpytest("--markers-explain")
+    result.stdout.re_match_lines(
+        [
+            # test_func[1]: parametrize slow comes before module slow (priority)
+            r".*test_func\[1\].*",
+            r".*\[0\]\* slow \(parametrize, registered\).*",
+            r".*\[1\]  slow \(module, registered\).*",
+            # test_func[2]: only module slow, no parametrize slow
+            r".*test_func\[2\].*",
+            r".*\[2\]\* slow \(module, registered\).*",
+            # TestClass::test_method: duplicate function slows keep order,
+            # the first one wins (has '*')
+            r".*TestClass.*test_method.*",
+            r".*\[3\]\* slow \(function, registered\).*",
+            r".*\[4\]  slow \(function, registered\).*",
+            r".*\[5\]  slow \(module, registered\).*",
+        ]
+    )
+    # The report must not trigger fixture setup.
+    assert not pytester.path.joinpath("fixture_triggered.txt").exists()
+
+
+def test_markers_explain_unknown(pytester: Pytester) -> None:
+    """Unregistered markers are diagnosed separately."""
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.unregistered_mark
+        def test_func():
+            assert True
+    """
+    )
+    result = pytester.runpytest("--markers-explain", "-o", "strict=false")
+    result.stdout.fnmatch_lines(
+        [
+            "*test_func*",
+            "*unregistered_mark (function, UNREGISTERED)*",
+            "*Unknown markers*",
+            "*unregistered_mark*",
+        ]
+    )
+
+
 def test_ini_markers_whitespace(pytester: Pytester) -> None:
     pytester.makeini(
         """

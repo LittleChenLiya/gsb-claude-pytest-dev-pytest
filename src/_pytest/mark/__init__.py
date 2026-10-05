@@ -10,6 +10,10 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 from .expression import Expression
+from .explain import iter_mark_explanations
+from .explain import MarkExplanation
+from .explain import MarkSource
+from .explain import write_markers_explain
 from .structures import _EmptyParameterSetMark
 from .structures import _HiddenParam
 from .structures import EMPTY_PARAMETERSET_OPTION
@@ -38,9 +42,12 @@ __all__ = [
     "MARK_GEN",
     "Mark",
     "MarkDecorator",
+    "MarkExplanation",
     "MarkGenerator",
+    "MarkSource",
     "ParameterSet",
     "get_empty_parameterset_mark",
+    "iter_mark_explanations",
 ]
 
 
@@ -124,6 +131,15 @@ def pytest_addoption(parser: Parser) -> None:
         help="show markers (builtin, plugin and per-project ones).",
     )
 
+    group.addoption(
+        "--markers-explain",
+        action="store_true",
+        dest="markers_explain",
+        help="Show an explanation of the markers collected on each test "
+        "item, grouped by source (module, class, parametrize, function) "
+        "with stable sequence numbers. Read-only: does not trigger fixtures.",
+    )
+
     parser.addini("markers", "Register new markers for test functions", "linelist")
     parser.addini(
         EMPTY_PARAMETERSET_OPTION,
@@ -146,6 +162,11 @@ def pytest_cmdline_main(config: Config) -> int | ExitCode | None:
             tw.line()
         config._ensure_unconfigure()
         return 0
+
+    if config.option.markers_explain:
+        from _pytest.main import wrap_session
+
+        return wrap_session(config, write_markers_explain)
 
     return None
 
