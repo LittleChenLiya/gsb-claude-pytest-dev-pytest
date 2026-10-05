@@ -2901,6 +2901,20 @@ Test Selection
 
     Show all available markers (builtin, plugin, and per-project markers defined in configuration).
 
+.. option:: --explain-marks
+
+    Show a read-only report after collection explaining, for each collected item,
+    every effective marker occurrence with its origin (module, class, parametrize
+    or function) and its real priority.
+
+    Same-name markers are listed individually in their original order, each
+    parametrized item keeps its own parameter-level marks, and unregistered
+    markers are reported in a separate diagnostics section. The report never
+    modifies items and never triggers fixtures, so it can be combined with
+    :option:`--collect-only`.
+
+    See :ref:`explain-marks` for more information.
+
 Test Execution Control
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -3497,6 +3511,11 @@ All the command-line flags can also be obtained by running ``pytest --help``::
                             ``all`` (the default) runs the full test suite
                             again. ``none`` just emits a message about no known
                             failures and exits successfully.
+      --explain-marks       Show a read-only report after collection explaining, for
+                            each collected item, every effective marker occurrence
+                            with its origin (module, class, parametrize or function)
+                            and its real priority. The report never modifies items
+                            and never triggers fixtures.
       --sw, --stepwise      Exit on test failure and continue from last failing
                             test next time
       --sw-skip, --stepwise-skip

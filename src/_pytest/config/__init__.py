@@ -359,6 +359,7 @@ default_plugins = (
     "junitxml",
     "doctest",
     "cacheprovider",
+    "markexplain",
     "setuponly",
     "setupplan",
     "stepwise",

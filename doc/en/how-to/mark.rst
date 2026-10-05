@@ -106,3 +106,72 @@ enforce this validation in your project by setting :confval:`strict_markers` in 
         markers =
             slow: marks tests as slow (deselect with '-m "not slow"')
             serial
+
+.. _explain-marks:
+
+Explaining effective marks
+--------------------------
+
+Marks can be applied at many levels (module, class, parameter set, test
+function) and the same mark name may be applied more than once, which can make
+it hard to tell which occurrence actually takes effect. The
+:option:`--explain-marks` command-line option prints a read-only report right
+after collection which explains, for every collected item, each effective
+marker occurrence with its origin and its real priority:
+
+.. code-block:: bash
+
+    pytest --explain-marks --collect-only
+
+For example, given:
+
+.. code-block:: python
+
+    import pytest
+
+    pytestmark = pytest.mark.slow
+
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(1, marks=pytest.mark.slow, id="marked"),
+            pytest.param(2, id="plain"),
+        ],
+    )
+    def test_param(value):
+        pass
+
+the report looks like::
+
+    mark explanation report (read-only: items are not modified, no fixtures are triggered):
+      item #0 test_module.py::test_param[marked]
+        mark #0 parametrize('value', [...]) [source=function, owner=test_module.py::test_param[marked]] (effective, registered)
+        mark #1 slow [source=parametrize, owner=test_module.py::test_param[marked]] (effective, registered)
+        mark #2 slow [source=module, owner=test_module.py] (shadowed, registered)
+      item #1 test_module.py::test_param[plain]
+        mark #0 parametrize('value', [...]) [source=function, owner=test_module.py::test_param[plain]] (effective, registered)
+        mark #1 slow [source=module, owner=test_module.py] (effective, registered)
+      2 of 2 collected items carry markers
+
+How to read the report:
+
+* ``item #N``/``mark #N`` are stable sequence numbers (collection order and
+  closest-first priority order), so reports of repeated runs are directly
+  comparable.
+* ``source`` tells where the mark comes from: ``module``, ``class``,
+  ``parametrize`` or ``function``. Each parametrized item keeps its own
+  parameter-level marks -- marks are never inherited from other parameter
+  sets (``test_param[plain]`` above has no ``parametrize``-sourced ``slow``).
+* Every occurrence is listed individually: same-name marks are never
+  collapsed into a single value, and duplicates keep their original order.
+  The first occurrence of a name is the ``effective`` one (the mark returned
+  by :meth:`Node.get_closest_marker <_pytest.nodes.Node.get_closest_marker>`);
+  later duplicates are ``shadowed``.
+* Marks which are not registered (builtin, plugin-provided or listed in the
+  :confval:`markers` configuration) are flagged as ``UNREGISTERED`` and are
+  also listed in a dedicated diagnostics section at the end of the report.
+
+The report is strictly observational: it never modifies items or keywords and
+never triggers fixtures, so it is safe to combine with
+:option:`--collect-only`.
