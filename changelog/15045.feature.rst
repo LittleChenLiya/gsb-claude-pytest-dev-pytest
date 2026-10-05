@@ -1,0 +1,16 @@
+Added the ``--fixture-ownership-report`` option, which records an optional
+fixture ownership report.  The report tracks the *actual* fixture lifecycle
+observed during a session: which fixture instances were really created
+(executed), which items or fixtures borrowed them, which finalizers were
+registered, and which were released.
+
+The report is built from observed events only -- it never executes fixtures a
+second time and never stores fixture values.  Each session uses its own report
+state, so parallel sessions do not share events.  A companion
+``--fixture-ownership-report-file`` option writes the report as JSON.
+
+Unlike ``--setup-show`` (which traces setup/teardown as it happens) and
+``--setup-plan`` (which only predicts what would run), this report distinguishes
+fixtures that failed their own setup from fixtures that were never created
+because a dependency failed.  Finalizer exceptions do not erase other fixtures'
+release events.
