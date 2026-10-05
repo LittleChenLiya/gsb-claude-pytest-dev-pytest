@@ -1,0 +1,8 @@
+Added the ``--fixture-ownership-report`` option, which prints a chronological
+report of the *actual* fixture lifecycle events observed during the session:
+creation, borrowing, finalizer registration and release, including
+``create-failed``/``dependency-failed`` distinctions and ``release-skipped``
+entries for fixtures which were never created.
+
+The report is purely observational: it never executes fixtures itself, never
+stores fixture values, and keeps its state per test session.

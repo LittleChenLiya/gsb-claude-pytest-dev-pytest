@@ -3043,6 +3043,15 @@ Fixtures
 
     Show what fixtures and tests would be executed but don't execute anything.
 
+.. option:: --fixture-ownership-report
+
+    Show a report of the actual fixture lifecycle events (creation,
+    borrowing, finalizer registration and release) observed during the
+    session, including ``create-failed``/``dependency-failed`` distinctions
+    and ``release-skipped`` entries for fixtures which were never created.
+    The report is purely observational: it does not execute fixtures itself
+    and does not store fixture values.
+
 Debugging
 ~~~~~~~~~
 
@@ -3627,6 +3636,10 @@ All the command-line flags can also be obtained by running ``pytest --help``::
       --setup-show          Show setup of fixtures while executing tests
       --setup-plan          Show what fixtures and tests would be executed but
                             don't execute anything
+      --fixture-ownership-report
+                            Show a report of the actual fixture lifecycle events
+                            (creation, borrowing, finalizer registration and
+                            release) observed during the session.
 
     logging:
       --log-level=LEVEL     Level of messages to catch/display. Not set by
